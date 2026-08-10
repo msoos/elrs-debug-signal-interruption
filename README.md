@@ -96,17 +96,33 @@ and is what the decoder is validated against.
 
 ### A Lua script to make the input predictable
 
-Still to be written. It runs on the handset and walks all 16 channels between
-1000 and 2000 µs on a fixed ramp, roughly 3–5 s per sweep, preceded by a marker
-preamble — all channels slammed to 1000, held 500 ms, to 2000, held 500 ms —
-before each run. The preamble matters because there is no clock shared between
-the handset and the capturing PC, so that pattern is the only thing that aligns
-expected against actual. The point of a known ramp is that no reference
-recording is needed: against a straight line, a frozen output, a repeated value
-or a bogus one is self-evident. Note that `16ch Rate/2` halves the per-channel
-update rate, and that ELRS sends channels 5–16 through the switch encoding at a
-much lower rate than 1–4 — both are normal, and both look like faults if the
-expected pattern does not account for them.
+`crsf_sweep.lua` runs on the handset and drives every channel through a fixed
+7.0 s cycle: a slam marker (0.2 s low, 0.2 s high, 0.2 s low), a 3 s ramp to the
+top, a 0.2 s dwell, a 3 s ramp back down, and a 0.2 s dwell. The cycle is
+continuous — it ends at the same value it starts at — so the only discontinuities
+in the whole waveform are the three deliberate marker edges. Those edges do two
+jobs: they align expected against actual, which matters because no clock is
+shared between the handset and the capturing PC, and their sharpness gives an
+end-to-end latency measurement that a ramp alone cannot. The ramps do the rest:
+against a straight line, a frozen output, a repeated value or a bogus one is
+self-evident without any reference recording.
+
+The script sets `GV1` between −100 and +100; the model's mixes turn that into
+channel values. Build this on a separate test model, not the glider's: CH1–4 and
+CH6–16 each get one mix with source `MAX` and weight `GV1`, and CH5 gets source
+`MAX` at a fixed `+100%` so ARM stays high throughout. The receiver sits on the
+bench with nothing connected but the logic analyzer, so a throttle channel
+ramping to full against a held ARM drives nothing.
+
+Two numbers matter when reading the logs. Full deflection is ±100%, which is
+988–2012 µs and 172–1811 in CRSF ticks, *not* 1000–2000; and `GV1` moves in
+integer percent, so each ramp is a 200-step staircase of about 5.1 µs, or 8.2
+ticks, per step. A healthy capture looks like that staircase, and the default
+`--max-jump` of 400 ticks sits far above it while still well below a slam.
+Note too that `16ch Rate/2` halves the per-channel update rate, and that ELRS
+sends channels 5–16 through the switch encoding at a much lower rate than 1–4 —
+both are normal, and both look like faults if the expected pattern does not
+account for them.
 
 ### What is probed decides what is proven
 
