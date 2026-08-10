@@ -101,9 +101,9 @@ class Stream:
             self.rc_w.writerow([f"{t:.6f}", f["sample"], self.name] + ticks)
 
 
-def reader_thread(proc, q, raw_file, state):
+def reader_thread(src, q, raw_file, state):
     while not stop_flag.is_set():
-        b = proc.stdout.read(BLOCK)
+        b = src.read(BLOCK)
         if not b:
             break
         state["bytes"] += len(b)
@@ -150,6 +150,8 @@ def main():
     p.add_argument("--driver", default="fx2lafw")
     p.add_argument("--conn", default=None)
     p.add_argument("--no-raw", action="store_true", help="skip raw.bin (no PulseView slices)")
+    p.add_argument("--from-raw", default=None,
+                   help="re-decode an existing raw.bin instead of capturing")
     p.add_argument("--max-gb", type=float, default=20.0)
     p.add_argument("--max-gap-ms", type=float, default=25.0)
     p.add_argument("--max-jump", type=int, default=400, help="ticks/frame before flagging")
@@ -158,11 +160,13 @@ def main():
     outdir = args.outdir or datetime.now().strftime("run-%Y%m%d-%H%M%S")
     os.makedirs(outdir, exist_ok=True)
 
-    cmd = ["sigrok-cli", "--driver", args.driver + (f":conn={args.conn}" if args.conn else ""),
-           "--config", f"samplerate={int(args.samplerate)}",
-           "--time", str(int(args.duration * 1000)), "-O", "binary"]
+    offline = args.from_raw is not None
+    cmd = None if offline else [
+        "sigrok-cli", "--driver", args.driver + (f":conn={args.conn}" if args.conn else ""),
+        "--config", f"samplerate={int(args.samplerate)}",
+        "--time", str(int(args.duration * 1000)), "-O", "binary"]
 
-    meta = {"cmd": cmd, "samplerate": args.samplerate, "baud": args.baud,
+    meta = {"cmd": cmd, "source": args.from_raw, "samplerate": args.samplerate, "baud": args.baud,
             "rx_channel": args.rx, "tx_channel": args.tx,
             "started": datetime.now().isoformat(), "duration_s": args.duration}
     with open(f"{outdir}/meta.json", "w") as fh:
@@ -176,12 +180,21 @@ def main():
     rc_w.writerow(["t_s", "sample", "dir"] + [f"ch{i}" for i in range(1, 17)])
     fr_w.writerow(["t_s", "sample", "dir", "type", "type_name", "len", "payload_hex"])
 
-    raw_file = None if args.no_raw else open(f"{outdir}/raw.bin", "wb")
+    raw_file = None if (args.no_raw or offline) else open(f"{outdir}/raw.bin", "wb")
 
-    print(f"-> {outdir}  ({args.samplerate/1e6:g} MHz, {args.baud} baud, "
-          f"{args.duration:g}s, ~{args.samplerate*args.duration/1e9:.2f} GB raw)", file=sys.stderr)
-
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    if offline:
+        n = os.path.getsize(args.from_raw)
+        print(f"-> {outdir}  re-decoding {args.from_raw} "
+              f"({n/1e6:.1f} MB = {n/args.samplerate:.2f}s)", file=sys.stderr)
+        proc = None
+        src = open(args.from_raw, "rb")
+    else:
+        print(f"-> {outdir}  ({args.samplerate/1e6:g} MHz, {args.baud} baud, "
+              f"{args.duration:g}s, ~{args.samplerate*args.duration/1e9:.2f} GB raw)",
+              file=sys.stderr)
+        assert cmd is not None
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        src = proc.stdout
 
     streams = [Stream("rx", args, rc_w, fr_w, ev_f)]
     if args.tx is not None:
@@ -189,11 +202,12 @@ def main():
 
     q = queue.Queue(maxsize=QUEUE_BLOCKS)
     state = {"bytes": 0, "lagged": 0, "hit_cap": False,
-             "max_bytes": int(args.max_gb * 1e9) if not args.no_raw else 0}
+             "max_bytes": 0 if (args.no_raw or offline) else int(args.max_gb * 1e9)}
 
-    threads = [threading.Thread(target=reader_thread, args=(proc, q, raw_file, state), daemon=True),
-               threading.Thread(target=decoder_thread, args=(q, streams), daemon=True),
-               threading.Thread(target=stderr_thread, args=(proc, log_f), daemon=True)]
+    threads = [threading.Thread(target=reader_thread, args=(src, q, raw_file, state), daemon=True),
+               threading.Thread(target=decoder_thread, args=(q, streams), daemon=True)]
+    if proc is not None:
+        threads.append(threading.Thread(target=stderr_thread, args=(proc, log_f), daemon=True))
     for t in threads:
         t.start()
 
@@ -212,12 +226,15 @@ def main():
             sys.stderr.flush()
     finally:
         stop_flag.set()
-        if proc.poll() is None:
-            proc.terminate()
-        threads[0].join(timeout=5)
+        if proc is not None:
+            if proc.poll() is None:
+                proc.terminate()
+            threads[0].join(timeout=5)
+            proc.wait(timeout=5)
+        else:
+            threads[0].join(timeout=30)
         q.put(None)
-        threads[1].join(timeout=30)
-        proc.wait(timeout=5)
+        threads[1].join(timeout=60)
 
         for f in (rc_f, fr_f, ev_f, log_f):
             f.close()
@@ -225,15 +242,18 @@ def main():
             raw_file.close()
 
     el = time.monotonic() - t0
-    expected = int(args.samplerate * min(el, args.duration))
-    short = expected - state["bytes"]
     print("\n" + "-" * 62, file=sys.stderr)
     for s in streams:
         print(f"{s.name}: {s.frames} frames ({s.rc_frames} RC), "
               f"{s.anomalies} anomalies, {s.parser.dropped} unparsed bytes", file=sys.stderr)
-    print(f"raw: {state['bytes']/1e6:.1f} MB in {el:.1f}s "
-          f"({state['bytes']/el/1e6:.2f} MB/s), shortfall ~{short/args.samplerate*1000:.0f} ms",
-          file=sys.stderr)
+    if offline:
+        print(f"decoded {state['bytes']/1e6:.1f} MB "
+              f"({state['bytes']/args.samplerate:.2f}s) in {el:.1f}s", file=sys.stderr)
+    else:
+        short = int(args.samplerate * min(el, args.duration)) - state["bytes"]
+        print(f"raw: {state['bytes']/1e6:.1f} MB in {el:.1f}s "
+              f"({state['bytes']/el/1e6:.2f} MB/s), "
+              f"shortfall ~{short/args.samplerate*1000:.0f} ms", file=sys.stderr)
     if state["lagged"]:
         print(f"WARNING: decoder lagged on {state['lagged']} block(s); "
               f"raw.bin is complete, re-decode offline", file=sys.stderr)

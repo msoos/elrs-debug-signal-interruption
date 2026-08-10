@@ -1,0 +1,14 @@
+__pycache__/
+
+# capture output
+run-*/
+raw.bin
+*.sr
+
+# nested clone, not a submodule
+sigrok_crsf_decoder/
+
+# unpacked .sr contents
+logic-1-1
+metadata
+version
