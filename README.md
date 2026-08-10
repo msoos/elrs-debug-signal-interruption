@@ -81,8 +81,7 @@ intermittent would be equally silent and cannot be excluded. In order of value:
 The hypothesis concerns what the receiver *did with* the packets it received,
 which no log here observes. An AZ-Delivery FX2LP clone (`0925:3881`, same chip
 as a Saleae Logic) watches the receiver's pins at 8 MHz — 19 samples per bit at
-CRSF's 420000 baud, 125 ns on a servo pulse. `data2.sr` is the reference
-capture: 100% CRC-valid, and what the decoder is validated against.
+CRSF's 420000 baud, 125 ns on a servo pulse.
 
 ### A Lua script to make the input predictable
 
@@ -137,9 +136,10 @@ for PulseView. It flags two things, both computed from `rc.csv` so thresholds
 can be retuned without recapturing: a channel **stuck** for ≥1 s while the
 others keep moving, and a channel **diverged** from the cross-channel consensus.
 Because the sweep moves every channel in lockstep, the marker slams cancel out
-of the consensus and only a channel going its own way is reported. The decoder is byte-identical to `sigrok-cli`'s `uart` decoder on
-`data2.sr`. **A PWM decoder does not exist yet** — without it the rig captures
-the discriminating signal but cannot read it.
+of the consensus and only a channel going its own way is reported. The decoder
+was checked byte-identical against `sigrok-cli`'s own `uart` decoder. **A PWM
+decoder does not exist yet** — without it the rig captures the discriminating
+signal but cannot read it.
 
 Logs cost ~0.9 MB/min, so soak runs are cheap. Raw samples need `--raw`, cost
 0.48 GB/min, and exist only to feed `crsf_slice.py`: soak without raw until the
@@ -150,7 +150,8 @@ fault reproduces, then repeat with `--raw` (and `--max-gb`) for the waveform.
 [`sigrok_crsf_decoder`][crsf-pd] by James Cordell is what makes a captured window
 readable in PulseView, annotating CRSF on top of sigrok's `uart`. Install its
 `crsf/` directory into `~/.local/share/libsigrokdecode/decoders/`. The Python
-decoder here is independent; the two agree channel for channel on `data2.sr`.
+decoder here is independent; run against the same capture, the two agree channel
+for channel.
 
 [crsf-pd]: https://github.com/JamesCordell/sigrok_crsf_decoder/
 [2548]: https://github.com/ExpressLRS/ExpressLRS/issues/2548
