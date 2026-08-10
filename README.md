@@ -185,6 +185,18 @@ to soak without raw until the fault reproduces at all, then repeat with `--raw`
 (and `--max-gb`, which caps an unattended run) to get the waveform evidence for
 the window that misbehaved.
 
+## Acknowledgements
+
+[`sigrok_crsf_decoder`][crsf-pd] by James Cordell is what makes a captured
+window readable in PulseView: a CRSF decoder stacked on sigrok's `uart` that
+annotates sync, length, type and CRC and unpacks the channel values on screen.
+Install its `crsf/` directory into `/usr/share/libsigrokdecode/decoders/`, or
+`~/.local/share/libsigrokdecode/decoders/` for a single user. The Python
+decoder in this repository is a separate implementation, written for streaming
+capture rather than display; the two were run against each other on `data2.sr`
+and agree channel for channel.
+
+[crsf-pd]: https://github.com/JamesCordell/sigrok_crsf_decoder/
 [2548]: https://github.com/ExpressLRS/ExpressLRS/issues/2548
 [3157]: https://github.com/ExpressLRS/ExpressLRS/issues/3157
 [3617]: https://github.com/ExpressLRS/ExpressLRS/issues/3617
