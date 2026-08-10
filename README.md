@@ -107,12 +107,34 @@ end-to-end latency measurement that a ramp alone cannot. The ramps do the rest:
 against a straight line, a frozen output, a repeated value or a bogus one is
 self-evident without any reference recording.
 
-The script sets `GV1` between −100 and +100; the model's mixes turn that into
-channel values. Build this on a separate test model, not the glider's: CH1–4 and
-CH6–16 each get one mix with source `MAX` and weight `GV1`, and CH5 gets source
-`MAX` at a fixed `+100%` so ARM stays high throughout. The receiver sits on the
-bench with nothing connected but the logic analyzer, so a throttle channel
-ramping to full against a held ARM drives nothing.
+Copy the file to **`/SCRIPTS/TOOLS/crsf_sweep.lua`** on the radio's SD card. Any
+`.lua` in that directory is picked up as a tool and appears under *System menu →
+Tools*, listed as "CRSF Sweep" — the name comes from the `TNS|...|TNE` marker
+near the top of the script, not from the filename. It runs only while the
+tool is open, which also keeps the screen awake for the length of a soak run;
+EXIT stops it and leaves the output at −100%.
+
+The script itself writes one number: it sets `GV1` between −100 and +100. It
+cannot write channel values directly, because EdgeTX gives Lua no such call, and
+a GVAR is not a valid mix *source* — GVARs are only usable as mix *parameters*
+such as weight, offset or curve. The way round that is the `MAX`/`GV1` idiom.
+`MAX` is a constant source sitting permanently at +100%, and a mix multiplies
+its source by its weight, so a mix of `MAX` with weight `GV1` outputs exactly
+`GV1` percent. Setting `GV1 = 42` in Lua therefore parks that channel at +42%,
+or 1715 µs. That indirection is what gives the script write access to a channel
+at all. One GVAR is enough for the whole sweep because every moving channel
+carries the same value at the same instant, so all fifteen of them can read the
+same weight.
+
+Build this on a separate test model, not the glider's:
+
+| Channel | Source | Weight | Result |
+|---|---|---|---|
+| CH1–4, CH6–16 | `MAX` | `GV1` | follows the sweep, −100% to +100% |
+| CH5 | `MAX` | `+100%` fixed | ARM held high for the whole run |
+
+The receiver sits on the bench with nothing connected but the logic analyzer, so
+a throttle channel ramping to full against a held ARM drives nothing.
 
 Two numbers matter when reading the logs. Full deflection is ±100%, which is
 988–2012 µs and 172–1811 in CRSF ticks, *not* 1000–2000; and `GV1` moves in
