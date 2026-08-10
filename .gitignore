@@ -3,7 +3,7 @@ __pycache__/
 # capture output
 run-*/
 raw.bin
-*.sr
+bug-*.sr
 
 # nested clone, not a submodule
 sigrok_crsf_decoder/
