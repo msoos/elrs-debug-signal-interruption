@@ -62,20 +62,6 @@ at tag 3.6.3, `src/lib/SX1280Driver/SX1280.cpp:502` still reads
 Against it: corruption should fail CRC and cost link quality, and none was seen;
 and the 4.0.1 fix is tied to reset and reconnect, neither of which occurred.
 
-## Status and actions
-
-Unproven, and these logs cannot prove it — they record what the transmitter sent
-and what the link did, nothing about what the servos moved. A wing servo harness
-intermittent would be equally silent and cannot be excluded. In order of value:
-
-- **4.0.1 or later** at both ends (not backward compatible, flash together)
-- **12ch Mixed** instead of `16ch Rate/2` — a drop-in for this channel map that
-  doubles the CH1–4 rate from 83 to 166 Hz — and telemetry down to **1:8**
-- a camera looking down the wing
-- failsafe set to a distinctive position (full crow), so it stops being
-  indistinguishable from frozen outputs
-- voltage telemetry moved to the built-in receiver voltage, exposing the BEC rail
-
 ## Bench reproduction with a logic analyzer
 
 The hypothesis concerns what the receiver *did with* the packets it received,
@@ -83,7 +69,7 @@ which no log here observes. An AZ-Delivery FX2LP clone (`0925:3881`, same chip
 as a Saleae Logic) watches the receiver's pins at 8 MHz — 19 samples per bit at
 CRSF's 420000 baud, 125 ns on a servo pulse.
 
-### A Lua script to make the input predictable
+### A Lua script to drive a sweep on the radio
 
 `crsf_sweep.lua` goes in **`/SCRIPTS/TOOLS/`** on the SD card and appears under
 *System → Tools*. It drives a 7.0 s cycle: a slam marker (0.2 s low, high, low),
@@ -112,19 +98,7 @@ sets the divergence threshold. `16ch Rate/2` halves the
 per-channel rate, and channels 5–16 ride the switch encoding far slower than
 1–4 — both normal, both fault-shaped if unaccounted for.
 
-### What is probed decides what is proven
-
-CRSF shows what was commanded and decoded; PWM shows what the servos were told.
-Only capturing both separates the candidates:
-
-| CRSF | PWM out | Reading |
-|---|---|---|
-| moving | moving | receiver fine — look at the harness or the servos |
-| moving | frozen / bogus | **the hypothesis**: outputs stop tracking received data |
-| frozen | — | failure upstream of the output stage, in RF or decode |
-| absent | — | link or power, which the telemetry already argues against |
-
-### Tooling
+### Tooling for Capture and Analysis
 
 `crsf_capture.py` streams the analyzer and decodes CRSF live to `rc.csv` and
 `events.jsonl`, showing all 16 channels updating in place on one status line. It
