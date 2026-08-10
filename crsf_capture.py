@@ -9,6 +9,7 @@ import csv
 import json
 import os
 import queue
+import shutil
 import signal
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from datetime import datetime
 import numpy as np
 
 from crsf_decode import (TICK_MAX, TICK_MIN, TYPE_NAMES, T_RC_CHANNELS,
-                         CrsfParser, UartDecoder, unpack_channels)
+                         CrsfParser, UartDecoder, ticks_to_us, unpack_channels)
 
 BLOCK = 1 << 20
 QUEUE_BLOCKS = 64
@@ -42,6 +43,7 @@ class Stream:
         self.last_ticks = None
         self.prev_dropped = 0
         self.anomalies = 0
+        self.synced = False
 
     def _event(self, sample, kind, **detail):
         self.anomalies += 1
@@ -58,8 +60,14 @@ class Stream:
         if self.parser.dropped > self.prev_dropped:
             n = self.parser.dropped - self.prev_dropped
             self.prev_dropped = self.parser.dropped
-            ref = frames[0]["sample"] if frames else (events[-1][0] if events else 0)
-            self._event(ref, "unparsed_bytes", count=int(n), framing_errors=int(bad_framing))
+            # bytes before the first good frame are just the frame in flight when
+            # capture started, not a fault
+            if self.synced:
+                ref = frames[0]["sample"] if frames else (events[-1][0] if events else 0)
+                self._event(ref, "unparsed_bytes", count=int(n),
+                            framing_errors=int(bad_framing))
+        if frames:
+            self.synced = True
 
         sr = self.args.samplerate
         for f in frames:
@@ -99,6 +107,23 @@ class Stream:
             self.last_ticks = ticks
 
             self.rc_w.writerow([f"{t:.6f}", f["sample"], self.name] + ticks)
+
+
+def status_line(el, state, s, show, width):
+    ticks = s.last_ticks
+    if ticks is None:
+        chans = " ".join(["----"] * 16)
+    elif show == "us":
+        chans = " ".join(f"{round(ticks_to_us(v)):4d}" for v in ticks)
+    else:
+        chans = " ".join(f"{v:4d}" for v in ticks)
+
+    line = (f"{el:6.1f}s rc={s.rc_frames:6d} {s.rc_frames/max(el, 1e-9):5.1f}/s "
+            f"a={s.anomalies:3d} lag={state['lagged']} | {chans}")
+    # channels are the point of this line; drop the stats before truncating them
+    if len(line) >= width:
+        line = chans
+    return line[:width - 1]
 
 
 def reader_thread(src, q, raw_file, state):
@@ -149,7 +174,10 @@ def main():
     p.add_argument("--tx", type=int, default=None, help="channel for FC->RX (default off)")
     p.add_argument("--driver", default="fx2lafw")
     p.add_argument("--conn", default=None)
-    p.add_argument("--no-raw", action="store_true", help="skip raw.bin (no PulseView slices)")
+    p.add_argument("--raw", action="store_true",
+                   help="also write raw.bin (0.48 GB/min; needed for crsf_slice.py)")
+    p.add_argument("--show", choices=("us", "ticks"), default="us",
+                   help="units for the live channel display (default us)")
     p.add_argument("--from-raw", default=None,
                    help="re-decode an existing raw.bin instead of capturing")
     p.add_argument("--max-gb", type=float, default=20.0)
@@ -180,7 +208,8 @@ def main():
     rc_w.writerow(["t_s", "sample", "dir"] + [f"ch{i}" for i in range(1, 17)])
     fr_w.writerow(["t_s", "sample", "dir", "type", "type_name", "len", "payload_hex"])
 
-    raw_file = None if (args.no_raw or offline) else open(f"{outdir}/raw.bin", "wb")
+    keep_raw = args.raw and not offline
+    raw_file = open(f"{outdir}/raw.bin", "wb") if keep_raw else None
 
     if offline:
         n = os.path.getsize(args.from_raw)
@@ -189,9 +218,10 @@ def main():
         proc = None
         src = open(args.from_raw, "rb")
     else:
+        raw_note = (f"~{args.samplerate*args.duration/1e9:.2f} GB raw"
+                    if keep_raw else "no raw (--raw to keep)")
         print(f"-> {outdir}  ({args.samplerate/1e6:g} MHz, {args.baud} baud, "
-              f"{args.duration:g}s, ~{args.samplerate*args.duration/1e9:.2f} GB raw)",
-              file=sys.stderr)
+              f"{args.duration:g}s, {raw_note})", file=sys.stderr)
         assert cmd is not None
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
         src = proc.stdout
@@ -202,7 +232,7 @@ def main():
 
     q = queue.Queue(maxsize=QUEUE_BLOCKS)
     state = {"bytes": 0, "lagged": 0, "hit_cap": False,
-             "max_bytes": 0 if (args.no_raw or offline) else int(args.max_gb * 1e9)}
+             "max_bytes": int(args.max_gb * 1e9) if keep_raw else 0}
 
     threads = [threading.Thread(target=reader_thread, args=(src, q, raw_file, state), daemon=True),
                threading.Thread(target=decoder_thread, args=(q, streams), daemon=True)]
@@ -215,15 +245,14 @@ def main():
 
     t0 = time.monotonic()
     try:
+        prev = 0
         while not stop_flag.is_set() and threads[0].is_alive():
-            time.sleep(0.5)
-            el = time.monotonic() - t0
-            s = streams[0]
-            sys.stderr.write(
-                f"\r{el:7.1f}s  {state['bytes']/1e6:8.1f} MB  "
-                f"rc={s.rc_frames:6d} ({s.rc_frames/max(el,1e-9):5.1f}/s)  "
-                f"anom={s.anomalies:4d}  q={q.qsize():2d}  lag={state['lagged']}   ")
+            time.sleep(0.2)
+            width = shutil.get_terminal_size((160, 24)).columns
+            line = status_line(time.monotonic() - t0, state, streams[0], args.show, width)
+            sys.stderr.write("\r" + line.ljust(prev))
             sys.stderr.flush()
+            prev = len(line)
     finally:
         stop_flag.set()
         if proc is not None:
@@ -251,12 +280,14 @@ def main():
               f"({state['bytes']/args.samplerate:.2f}s) in {el:.1f}s", file=sys.stderr)
     else:
         short = int(args.samplerate * min(el, args.duration)) - state["bytes"]
-        print(f"raw: {state['bytes']/1e6:.1f} MB in {el:.1f}s "
+        print(f"stream: {state['bytes']/1e6:.1f} MB in {el:.1f}s "
               f"({state['bytes']/el/1e6:.2f} MB/s), "
               f"shortfall ~{short/args.samplerate*1000:.0f} ms", file=sys.stderr)
     if state["lagged"]:
-        print(f"WARNING: decoder lagged on {state['lagged']} block(s); "
-              f"raw.bin is complete, re-decode offline", file=sys.stderr)
+        tail = ("raw.bin is complete, re-decode with --from-raw" if keep_raw
+                else "those samples are GONE — rerun with --raw to make lag recoverable")
+        print(f"WARNING: decoder lagged on {state['lagged']} block(s); {tail}",
+              file=sys.stderr)
     if state["hit_cap"]:
         print(f"WARNING: stopped at --max-gb {args.max_gb}", file=sys.stderr)
     print(f"-> {outdir}/rc.csv  events.jsonl  frames.csv", file=sys.stderr)

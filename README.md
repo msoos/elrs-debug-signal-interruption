@@ -108,8 +108,9 @@ exclude:
 | absent | — | link or power, which the flight telemetry already argues against |
 
 **Tooling.** `crsf_capture.py` streams the analyzer and decodes CRSF live,
-writing `rc.csv` (one row per frame, 16 channels in ticks), `events.jsonl`
-(anomalies), and `raw.bin`. It sustains 8.02 MB/s using about 13% of one core,
+writing `rc.csv` (one row per frame, 16 channels in ticks) and `events.jsonl`
+(anomalies), while showing all 16 channels updating in place on one status
+line. It sustains 8.02 MB/s using about 13% of one core,
 so capture is gapless — which matters here, because a dropout is itself a
 plausible symptom and a gapped capture could not tell one from the other.
 `crsf_analyze.py` summarises a run and prints, for each anomaly window, the
@@ -119,11 +120,13 @@ decoder on `data2.sr`. **A PWM decoder does not exist yet** and is the
 remaining piece: without it the rig captures the discriminating signal but
 cannot yet read it.
 
-**Practical notes.** Raw capture costs 0.48 GB per minute. The episodes lasted
-30–60 s in flight and are intermittent, so a soak run is likely; `--no-raw`
-drops the cost to about 1 MB/min of CSV, enough to establish that the fault
-reproduces at all, after which a shorter run with raw retained gets the
-waveform evidence. `--max-gb` caps the damage on a long run left unattended.
+**Practical notes.** The decoded logs cost about 0.9 MB per minute, so a soak
+run of any length is cheap — which matters, because the episodes lasted 30–60 s
+in flight and are intermittent. Raw samples are not written unless `--raw` is
+given; they cost 0.48 GB per minute and exist only to feed `crsf_slice.py`. The
+sensible order is to soak without raw until the fault reproduces at all, then
+repeat with `--raw` (and `--max-gb`, which caps an unattended run) to get the
+waveform evidence for the window that misbehaved.
 
 [2548]: https://github.com/ExpressLRS/ExpressLRS/issues/2548
 [3157]: https://github.com/ExpressLRS/ExpressLRS/issues/3157
