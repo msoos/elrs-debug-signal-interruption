@@ -44,6 +44,9 @@ class Stream:
         self.prev_dropped = 0
         self.anomalies = 0
         self.synced = False
+        self.last_change = [0] * 16
+        self.moved = [False] * 16
+        self.stuck_flagged = [False] * 16
 
     def _event(self, sample, kind, **detail):
         self.anomalies += 1
@@ -99,11 +102,23 @@ class Stream:
             if oor:
                 self._event(f["sample"], "out_of_range", channels=oor)
 
+            # a channel that stops moving while the others carry on is the
+            # hypothesis itself; a channel that never moves is deliberate (ARM)
             if self.last_ticks is not None:
-                jumps = [(i + 1, self.last_ticks[i], v) for i, v in enumerate(ticks)
-                         if abs(v - self.last_ticks[i]) > self.args.max_jump]
-                if jumps:
-                    self._event(f["sample"], "jump", channels=jumps)
+                changed = [i for i in range(16) if ticks[i] != self.last_ticks[i]]
+                for i in changed:
+                    self.moved[i] = True
+                    self.last_change[i] = f["sample"]
+                    self.stuck_flagged[i] = False
+                if changed:
+                    for i in range(16):
+                        if self.moved[i] and not self.stuck_flagged[i]:
+                            held = (f["sample"] - self.last_change[i]) / sr
+                            if held >= self.args.stuck_s:
+                                self._event(f["sample"], "stuck", channel=i + 1,
+                                            seconds=round(held, 3),
+                                            value=int(ticks[i]))
+                                self.stuck_flagged[i] = True
             self.last_ticks = ticks
 
             self.rc_w.writerow([f"{t:.6f}", f["sample"], self.name] + ticks)
@@ -182,7 +197,8 @@ def main():
                    help="re-decode an existing raw.bin instead of capturing")
     p.add_argument("--max-gb", type=float, default=20.0)
     p.add_argument("--max-gap-ms", type=float, default=25.0)
-    p.add_argument("--max-jump", type=int, default=400, help="ticks/frame before flagging")
+    p.add_argument("--stuck-s", type=float, default=1.0,
+                   help="flag a channel held this long while others move (default 1.0)")
     args = p.parse_args()
 
     outdir = args.outdir or datetime.now().strftime("run-%Y%m%d-%H%M%S")

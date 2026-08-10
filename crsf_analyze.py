@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarise a capture run: frame health, per-channel behaviour, anomaly clusters.
+"""Summarise a capture run: frame health, per-channel behaviour, anomaly windows.
 
 Usage: ./crsf_analyze.py run1
 """
@@ -26,13 +26,56 @@ def load_rc(path, direction):
     return np.array(t), np.array(ch, dtype=np.int32)
 
 
+def find_stuck(t, ch, moving, world, stuck_s):
+    """Channels held constant for >= stuck_s while other channels kept moving."""
+    out = []
+    d = np.diff(ch, axis=0)
+    for i in moving:
+        pts = np.concatenate(([0], np.flatnonzero(d[:, i] != 0) + 1, [len(t) - 1]))
+        for a, b in zip(pts[:-1], pts[1:]):
+            if b <= a:
+                continue
+            dur = t[b] - t[a]
+            if dur >= stuck_s and world[a:b].any():
+                out.append({"kind": "stuck", "ch": i + 1, "start": t[a], "end": t[b],
+                            "detail": f"held {ch[a, i]} for {dur:.2f}s"})
+    return out
+
+
+def find_diverged(t, ch, moving, tol, min_frames):
+    """Channels disagreeing with the cross-channel consensus.
+
+    The sweep moves every channel in lockstep, so the median across channels is
+    what each one should read. Marker slams move all of them together and cancel
+    out; a single channel going its own way does not.
+    """
+    out = []
+    med = np.median(ch[:, moving], axis=1)
+    for i in moving:
+        bad = np.abs(ch[:, i] - med) > tol
+        if not bad.any():
+            continue
+        edges = np.diff(np.concatenate(([0], bad.view(np.int8), [0])))
+        for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+            if b - a < min_frames:
+                continue
+            worst = int(np.abs(ch[a:b, i] - med[a:b]).max())
+            out.append({"kind": "diverged", "ch": i + 1, "start": t[a], "end": t[b - 1],
+                        "detail": f"up to {worst} ticks off consensus"})
+    return out
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("rundir")
     p.add_argument("--dir", default="rx", choices=("rx", "tx"))
-    p.add_argument("--cluster-s", type=float, default=0.5,
-                   help="merge anomalies closer than this into one window")
+    p.add_argument("--stuck-s", type=float, default=1.0)
+    # healthy lag between channels tops out at one staircase step (~34 ticks);
+    # marker slams show up as 1-frame transients, hence the 3-frame minimum
+    p.add_argument("--diverge-ticks", type=int, default=40)
+    p.add_argument("--min-diverge-frames", type=int, default=3)
+    p.add_argument("--cluster-s", type=float, default=0.5)
     args = p.parse_args()
 
     t, ch = load_rc(os.path.join(args.rundir, "rc.csv"), args.dir)
@@ -56,57 +99,67 @@ def main():
         if gaps.size > 15:
             print(f"   ... and {gaps.size - 15} more")
 
+    rng = ch.max(0) - ch.min(0)
+    moving = np.flatnonzero(rng >= 10)
+    d = np.diff(ch, axis=0)
+    world = (d[:, moving] != 0).any(axis=1) if moving.size else np.zeros(len(t) - 1, bool)
+
     print(f"\nper-channel (ticks {TICK_MIN}..{TICK_MAX} = {ticks_to_us(TICK_MIN):.0f}.."
           f"{ticks_to_us(TICK_MAX):.0f} us):")
     print(f"{'ch':>3} {'min':>6} {'max':>6} {'min_us':>7} {'max_us':>7} "
           f"{'levels':>7} {'chg/s':>7}  note")
     for i in range(16):
         c = ch[:, i]
-        changes = int(np.count_nonzero(np.diff(c)))
-        levels = len(np.unique(c))
         note = []
         if c.min() < TICK_MIN or c.max() > TICK_MAX:
             note.append("OUT-OF-RANGE")
-        if changes == 0:
-            note.append("static")
-        elif levels <= 8 and len(t) >= 200:
-            note.append("quantised (ELRS switch ch?)")
+        if rng[i] < 10:
+            note.append("held constant")
         print(f"{i+1:>3} {c.min():>6} {c.max():>6} {ticks_to_us(c.min()):>7.0f} "
-              f"{ticks_to_us(c.max()):>7.0f} {levels:>7} {changes/span:>7.1f}  "
-              f"{' '.join(note)}")
+              f"{ticks_to_us(c.max()):>7.0f} {len(np.unique(c)):>7} "
+              f"{int(np.count_nonzero(d[:, i]))/span:>7.1f}  {' '.join(note)}")
+
+    findings = []
+    if moving.size:
+        findings += find_stuck(t, ch, moving, world, args.stuck_s)
+        findings += find_diverged(t, ch, moving, args.diverge_ticks,
+                                  args.min_diverge_frames)
+
+    print(f"\nchannel behaviour (stuck >={args.stuck_s}s, diverged >{args.diverge_ticks} "
+          f"ticks from consensus):")
+    if not findings:
+        print("  clean — every moving channel tracked the others throughout")
+    else:
+        for f in sorted(findings, key=lambda f: f["start"])[:30]:
+            print(f"  {f['kind']:9s} ch{f['ch']:<3d} t={f['start']:9.4f}s.."
+                  f"{f['end']:9.4f}s  {f['detail']}")
+        if len(findings) > 30:
+            print(f"  ... and {len(findings) - 30} more")
+
+        windows = []
+        for f in sorted(findings, key=lambda f: f["start"]):
+            if windows and f["start"] - windows[-1]["end"] <= args.cluster_s:
+                windows[-1]["end"] = max(windows[-1]["end"], f["end"])
+                windows[-1]["chs"].add(f["ch"])
+            else:
+                windows.append({"start": f["start"], "end": f["end"], "chs": {f["ch"]}})
+        print(f"\n{len(windows)} window(s) to look at:")
+        for w in windows[:10]:
+            print(f"  t={w['start']:9.4f}s..{w['end']:9.4f}s  "
+                  f"ch {sorted(w['chs'])}")
+            print(f"     ./crsf_slice.py {args.rundir}/raw.bin "
+                  f"--start {max(0, w['start']-0.2):.3f} --end {w['end']+0.2:.3f} "
+                  f"-o {args.rundir}/bug-{w['start']:.3f}.sr")
 
     ev_path = os.path.join(args.rundir, "events.jsonl")
-    events = []
     if os.path.exists(ev_path):
         with open(ev_path) as fh:
             events = [json.loads(l) for l in fh if l.strip()]
-    events = [e for e in events if e.get("dir") == args.dir]
-
-    print(f"\n{len(events)} anomaly event(s)")
-    if not events:
-        print("  clean")
-        return
-    for kind, n in Counter(e["kind"] for e in events).most_common():
-        print(f"  {kind:<18} {n}")
-
-    windows = []
-    for e in sorted(events, key=lambda e: e["t_s"]):
-        if windows and e["t_s"] - windows[-1]["end"] <= args.cluster_s:
-            windows[-1]["end"] = e["t_s"]
-            windows[-1]["n"] += 1
-            windows[-1]["kinds"][e["kind"]] += 1
-        else:
-            windows.append({"start": e["t_s"], "end": e["t_s"], "n": 1,
-                            "kinds": Counter([e["kind"]])})
-
-    print(f"\n{len(windows)} anomaly window(s), worst first:")
-    for w in sorted(windows, key=lambda w: -w["n"])[:20]:
-        dur = w["end"] - w["start"]
-        kinds = " ".join(f"{k}={v}" for k, v in w["kinds"].most_common())
-        print(f"  t={w['start']:9.4f}s..{w['end']:9.4f}s ({dur:6.3f}s) "
-              f"{w['n']:5d} events  {kinds}")
-        print(f"     ./crsf_slice.py {args.rundir}/raw.bin --start {max(0, w['start']-0.2):.3f} "
-              f"--end {w['end']+0.2:.3f} -o {args.rundir}/bug-{w['start']:.3f}.sr")
+        events = [e for e in events if e.get("dir") == args.dir
+                  and e["kind"] not in ("stuck",)]
+        print(f"\nframe-level events from capture: {len(events)}")
+        for kind, n in Counter(e["kind"] for e in events).most_common():
+            print(f"  {kind:<18} {n}")
 
 
 if __name__ == "__main__":
