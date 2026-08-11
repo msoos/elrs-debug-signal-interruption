@@ -88,6 +88,29 @@ def find_stuck(t, ch, moving, world, stuck_s):
     return out
 
 
+def find_frozen_all(t, ch, active, stuck_s):
+    """Every channel stopped at once.
+
+    find_stuck needs some other channel still moving as its reference, so it is
+    blind to a receiver that freezes all outputs together -- which is exactly
+    the failure being hunted. This looks for stretches where nothing moved.
+    """
+    if not len(active):
+        return []
+    moved = (np.diff(ch[:, active], axis=0) != 0).any(axis=1)
+    pts = np.concatenate(([0], np.flatnonzero(moved) + 1, [len(t) - 1]))
+    out = []
+    for a, b in zip(pts[:-1], pts[1:]):
+        if b <= a:
+            continue
+        dur = t[b] - t[a]
+        if dur >= stuck_s:
+            vals = ",".join(str(int(v)) for v in ch[a, active][:8])
+            out.append({"kind": "ALL-FROZEN", "ch": 0, "start": t[a], "end": t[b],
+                        "detail": f"no channel changed for {dur:.2f}s (held {vals})"})
+    return out
+
+
 def channel_groups(d, moving):
     """Cluster channels by which frames they update on.
 
@@ -203,7 +226,8 @@ def main():
               f"{ticks_to_us(c.max()):>7.0f} {len(np.unique(c)):>7} "
               f"{int(np.count_nonzero(d[:, i]))/span:>7.1f}  {' '.join(note)}")
 
-    findings = []
+    active = [i for i in range(16) if i + 1 not in ignore]
+    findings = find_frozen_all(t, ch, active, args.stuck_s)
     groups = []
     if moving.size:
         groups = channel_groups(d, moving)
@@ -221,7 +245,8 @@ def main():
         print("  clean — every moving channel tracked the others throughout")
     else:
         for f in sorted(findings, key=lambda f: f["start"])[:30]:
-            print(f"  {f['kind']:9s} ch{f['ch']:<3d} t={f['start']:9.4f}s.."
+            who = "ALL" if f["ch"] == 0 else f"ch{f['ch']}"
+            print(f"  {f['kind']:11s} {who:<5s} t={f['start']:9.4f}s.."
                   f"{f['end']:9.4f}s  {f['detail']}")
         if len(findings) > 30:
             print(f"  ... and {len(findings) - 30} more")
