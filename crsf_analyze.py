@@ -74,7 +74,7 @@ def load_rc(path, direction):
 
 def find_stuck(t, ch, moving, world, stuck_s):
     """Channels held constant for >= stuck_s while other channels kept moving."""
-    out = []
+    out, worst = [], {"dur": 0.0, "at": None, "ch": None}
     d = np.diff(ch, axis=0)
     for i in moving:
         pts = np.concatenate(([0], np.flatnonzero(d[:, i] != 0) + 1, [len(t) - 1]))
@@ -82,10 +82,14 @@ def find_stuck(t, ch, moving, world, stuck_s):
             if b <= a:
                 continue
             dur = t[b] - t[a]
-            if dur >= stuck_s and world[a:b].any():
+            if not world[a:b].any():
+                continue
+            if dur > worst["dur"]:
+                worst = {"dur": dur, "at": t[a], "ch": i + 1}
+            if dur >= stuck_s:
                 out.append({"kind": "stuck", "ch": i + 1, "start": t[a], "end": t[b],
                             "detail": f"held {ch[a, i]} for {dur:.2f}s"})
-    return out
+    return out, worst
 
 
 def find_frozen_all(t, ch, active, stuck_s):
@@ -96,19 +100,21 @@ def find_frozen_all(t, ch, active, stuck_s):
     the failure being hunted. This looks for stretches where nothing moved.
     """
     if not len(active):
-        return []
+        return [], {"dur": 0.0, "at": None, "ch": None}
     moved = (np.diff(ch[:, active], axis=0) != 0).any(axis=1)
     pts = np.concatenate(([0], np.flatnonzero(moved) + 1, [len(t) - 1]))
-    out = []
+    out, worst = [], {"dur": 0.0, "at": None, "ch": None}
     for a, b in zip(pts[:-1], pts[1:]):
         if b <= a:
             continue
         dur = t[b] - t[a]
+        if dur > worst["dur"]:
+            worst = {"dur": dur, "at": t[a], "ch": None}
         if dur >= stuck_s:
             vals = ",".join(str(int(v)) for v in ch[a, active][:8])
             out.append({"kind": "ALL-FROZEN", "ch": 0, "start": t[a], "end": t[b],
                         "detail": f"no channel changed for {dur:.2f}s (held {vals})"})
-    return out
+    return out, worst
 
 
 def channel_groups(d, moving):
@@ -139,24 +145,28 @@ def find_diverged(t, ch, groups, tol, min_frames):
     each should read. Marker slams move the whole group and cancel out; a single
     channel going its own way does not.
     """
-    out = []
+    out, worst = [], {"ticks": 0, "at": None, "ch": None}
     for g in groups:
         if len(g) < 3:
             continue
         med = np.median(ch[:, g], axis=1)
         for i in g:
-            bad = np.abs(ch[:, i] - med) > tol
+            dev = np.abs(ch[:, i] - med)
+            if dev.max() > worst["ticks"]:
+                k = int(dev.argmax())
+                worst = {"ticks": int(dev[k]), "at": float(t[k]), "ch": i + 1}
+            bad = dev > tol
             if not bad.any():
                 continue
             edges = np.diff(np.concatenate(([0], bad.view(np.int8), [0])))
             for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
                 if b - a < min_frames:
                     continue
-                worst = int(np.abs(ch[a:b, i] - med[a:b]).max())
+                off = int(np.abs(ch[a:b, i] - med[a:b]).max())
                 out.append({"kind": "diverged", "ch": i + 1, "start": t[a],
                             "end": t[b - 1],
-                            "detail": f"up to {worst} ticks off group consensus"})
-    return out
+                            "detail": f"up to {off} ticks off group consensus"})
+    return out, worst
 
 
 def main():
@@ -227,17 +237,17 @@ def main():
               f"{int(np.count_nonzero(d[:, i]))/span:>7.1f}  {' '.join(note)}")
 
     active = [i for i in range(16) if i + 1 not in ignore]
-    findings = find_frozen_all(t, ch, active, args.stuck_s)
+    frozen_f, frozen_w = find_frozen_all(t, ch, active, args.stuck_s)
+    findings = list(frozen_f)
     groups = []
+    stuck_w = {"dur": 0.0, "at": None, "ch": None}
+    div_w = {"ticks": 0, "at": None, "ch": None}
     if moving.size:
         groups = channel_groups(d, moving)
-        if len(groups) > 1:
-            print(f"\nupdate groups (channels never move together across groups):")
-            for g in groups:
-                print(f"  {[int(i) + 1 for i in g]}")
-        findings += find_stuck(t, ch, moving, world, args.stuck_s)
-        findings += find_diverged(t, ch, groups, args.diverge_ticks,
-                                  args.min_diverge_frames)
+        stuck_f, stuck_w = find_stuck(t, ch, moving, world, args.stuck_s)
+        div_f, div_w = find_diverged(t, ch, groups, args.diverge_ticks,
+                                     args.min_diverge_frames)
+        findings += stuck_f + div_f
 
     # one ALL-FROZEN says what 15 per-channel stuck lines say, and the display
     # is capped -- without this the important finding gets crowded out
@@ -252,11 +262,45 @@ def main():
 
     findings = [f for f in findings if f["kind"] != "stuck" or not covered(f)]
 
-    print(f"\nchannel behaviour (stuck >={args.stuck_s}s, diverged >{args.diverge_ticks} "
-          f"ticks from consensus):")
+    swept = ",".join(str(int(i) + 1) for i in moving) or "none"
+    const = [i + 1 for i in range(16) if i + 1 not in ignore and rng[i] < 10]
+    print(f"\nchannel behaviour:")
+    print(f"  scope: swept ch {swept} in {len(groups)} update group(s)"
+          f"{'  ' + str([[int(i)+1 for i in g] for g in groups]) if len(groups) > 1 else ''}")
+    print(f"         held constant {const or 'none'}; ignored {sorted(ignore) or 'none'}")
+
+    def check(name, ok, measured, limit, runnable=True):
+        tag = "PASS" if ok else "FAIL"
+        if not runnable:
+            tag, limit = "n/a ", "nothing to compare against"
+        print(f"  [{tag}] {name:<22s} {measured:<50s} {limit}")
+
+    at = lambda w: f" @ {w['at']:.1f}s" if w["at"] is not None else ""
+    can_compare = len(active) > 0
+    can_diverge = any(len(g) >= 3 for g in groups)
+
+    check("froze completely", not frozen_f,
+          f"longest span with nothing moving {frozen_w['dur']:.3f}s{at(frozen_w)}",
+          f"flags >={args.stuck_s}s", can_compare)
+    check("held steady (1 chan)", not any(f["kind"] == "stuck" for f in findings),
+          f"longest hold while others moved {stuck_w['dur']:.3f}s"
+          f"{' ch' + str(stuck_w['ch']) if stuck_w['ch'] else ''}{at(stuck_w)}"
+          if moving.size else "no channel was sweeping",
+          f"flags >={args.stuck_s}s", bool(moving.size))
+    check("went erratic", not any(f["kind"] == "diverged" for f in findings),
+          f"worst deviation from group consensus {div_w['ticks']} ticks"
+          f"{' ch' + str(div_w['ch']) if div_w['ch'] else ''}{at(div_w)}"
+          if can_diverge else "needs >=3 channels sweeping together",
+          f"flags >{args.diverge_ticks} for >={args.min_diverge_frames} frames",
+          can_diverge)
+
     if not findings:
-        print("  clean — every moving channel tracked the others throughout")
+        if can_compare and moving.size and can_diverge:
+            print("  -> all three checks ran and found nothing")
+        else:
+            print("  -> nothing found, but not every check could run (see n/a above)")
     else:
+        print()
         for f in sorted(findings, key=lambda f: f["start"])[:30]:
             who = "ALL" if f["ch"] == 0 else f"ch{f['ch']}"
             print(f"  {f['kind']:11s} {who:<5s} t={f['start']:9.4f}s.."
