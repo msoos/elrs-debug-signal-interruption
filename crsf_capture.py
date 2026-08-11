@@ -68,7 +68,9 @@ class Stream:
             if self.synced:
                 ref = frames[0]["sample"] if frames else (events[-1][0] if events else 0)
                 self._event(ref, "unparsed_bytes", count=int(n),
-                            framing_errors=int(bad_framing))
+                            framing_errors=int(bad_framing),
+                            hex=bytes(self.parser.dropped_bytes).hex())
+            self.parser.dropped_bytes.clear()
         if frames:
             self.synced = True
 

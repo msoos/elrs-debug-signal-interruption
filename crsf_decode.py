@@ -126,7 +126,13 @@ class CrsfParser:
         self.sync = set(sync)
         self.max_len = max_len
         self.dropped = 0
+        self.dropped_bytes = []
         self._buf = []
+
+    def _drop(self, value):
+        self.dropped += 1
+        if len(self.dropped_bytes) < 64:
+            self.dropped_bytes.append(value)
 
     def feed(self, byte_events):
         self._buf.extend(byte_events)
@@ -137,23 +143,23 @@ class CrsfParser:
 
         while i < n:
             if buf[i][1] not in self.sync:
+                self._drop(buf[i][1])
                 i += 1
-                self.dropped += 1
                 continue
             if i + 1 >= n:
                 break
             length = buf[i + 1][1]
             if not (2 <= length <= self.max_len):
+                self._drop(buf[i][1])
                 i += 1
-                self.dropped += 1
                 continue
             if i + 2 + length > n:
                 break
 
             body = [buf[j][1] for j in range(i + 2, i + 2 + length)]
             if crc8(body[:-1]) != body[-1]:
+                self._drop(buf[i][1])
                 i += 1
-                self.dropped += 1
                 continue
 
             framing_ok = all(buf[j][2] for j in range(i, i + 2 + length))
