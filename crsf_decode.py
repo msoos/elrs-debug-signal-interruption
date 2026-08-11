@@ -38,6 +38,23 @@ def us_to_ticks(us):
     return (us - 880.0) * 8.0 / 5.0
 
 
+TX_POWER_MW = {0: 0, 1: 10, 2: 25, 3: 100, 4: 500, 5: 1000, 6: 2000, 7: 50}
+
+
+def parse_link_stats(payload):
+    """LINK_STATISTICS (0x14) payload -> dict. RSSI values are negative dBm."""
+    if len(payload) < 10:
+        return None
+    s8 = lambda b: b - 256 if b > 127 else b
+    return {
+        "up_rssi1": -payload[0], "up_rssi2": -payload[1],
+        "up_lq": payload[2], "up_snr": s8(payload[3]),
+        "antenna": payload[4], "rf_mode": payload[5],
+        "tx_power_mw": TX_POWER_MW.get(payload[6], payload[6]),
+        "dn_rssi": -payload[7], "dn_lq": payload[8], "dn_snr": s8(payload[9]),
+    }
+
+
 def unpack_channels(payload):
     """22 bytes -> 16 channels of 11 bits, LSB-first."""
     v = int.from_bytes(payload[:22], "little")

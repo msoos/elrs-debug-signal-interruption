@@ -12,7 +12,53 @@ from collections import Counter
 
 import numpy as np
 
-from crsf_decode import TICK_MAX, TICK_MIN, ticks_to_us
+from crsf_decode import TICK_MAX, TICK_MIN, parse_link_stats, ticks_to_us
+
+
+def load_link_stats(path):
+    t, lq, rssi, snr = [], [], [], []
+    if not os.path.exists(path):
+        return (np.array([]),) * 4
+    with open(path) as fh:
+        for row in csv.DictReader(fh):
+            if row["type"] != "0x14":
+                continue
+            s = parse_link_stats(bytes.fromhex(row["payload_hex"]))
+            if s:
+                t.append(float(row["t_s"]))
+                lq.append(s["up_lq"])
+                rssi.append(s["up_rssi1"])
+                snr.append(s["up_snr"])
+    return np.array(t), np.array(lq), np.array(rssi), np.array(snr)
+
+
+def report_link(rundir, t_rc, med):
+    """Are the frame gaps RF-caused or receiver-caused?"""
+    lt, lq, rssi, snr = load_link_stats(os.path.join(rundir, "frames.csv"))
+    if lt.size == 0:
+        return
+    print(f"\nlink statistics ({lt.size} frames, {lt.size/(lt[-1]-lt[0]):.1f} Hz):")
+    print(f"  uplink LQ   min {lq.min():3d}  p1 {np.percentile(lq,1):5.1f}  "
+          f"median {np.median(lq):5.1f}")
+    print(f"  uplink RSSI min {rssi.min():4d}  median {np.median(rssi):6.1f} dBm"
+          f"   SNR min {snr.min():3d}  median {np.median(snr):5.1f} dB")
+
+    # LQ is a windowed delivery rate, so missing frames are expected at LQ<100.
+    # The question is whether more frames are missing than LQ accounts for.
+    observed = t_rc.size
+    expected = (t_rc[-1] - t_rc[0]) / (med / 1000.0)
+    loss = 1.0 - observed / expected
+    rf_loss = 1.0 - lq.mean() / 100.0
+    print(f"  frames present {observed} of ~{expected:.0f} expected at median "
+          f"cadence = {100*loss:.2f}% missing")
+    print(f"  uplink LQ accounts for {100*rf_loss:.2f}% loss "
+          f"(mean LQ {lq.mean():.1f})")
+    excess = loss - rf_loss
+    if excess > 0.02:
+        print(f"  -> {100*excess:.2f}% MORE missing than the link explains — "
+              f"the receiver dropped frames it had the data for")
+    else:
+        print(f"  -> consistent with the reported link quality; no unexplained loss")
 
 
 def load_rc(path, direction):
@@ -131,6 +177,8 @@ def main():
                   f"(~{dt[i]/np.median(dt):.1f} frames)")
         if gaps.size > 15:
             print(f"   ... and {gaps.size - 15} more")
+
+    report_link(args.rundir, t, np.median(dt))
 
     rng = ch.max(0) - ch.min(0)
     moving = np.array([i for i in np.flatnonzero(rng >= 10) if i + 1 not in ignore],
