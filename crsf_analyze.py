@@ -42,26 +42,51 @@ def find_stuck(t, ch, moving, world, stuck_s):
     return out
 
 
-def find_diverged(t, ch, moving, tol, min_frames):
-    """Channels disagreeing with the cross-channel consensus.
+def channel_groups(d, moving):
+    """Cluster channels by which frames they update on.
 
-    The sweep moves every channel in lockstep, so the median across channels is
-    what each one should read. Marker slams move all of them together and cancel
-    out; a single channel going its own way does not.
+    ELRS half-rate switch modes send alternate halves of the payload on
+    successive packets, so channels do not all move together and a single
+    cross-channel consensus would be meaningless. Each group gets its own.
+    """
+    masks = {i: d[:, i] != 0 for i in moving}
+    groups = []
+    for i in moving:
+        for g in groups:
+            inter = int((masks[i] & masks[g[0]]).sum())
+            union = int((masks[i] | masks[g[0]]).sum())
+            if union and inter / union > 0.5:
+                g.append(i)
+                break
+        else:
+            groups.append([i])
+    return groups
+
+
+def find_diverged(t, ch, groups, tol, min_frames):
+    """Channels disagreeing with the consensus of their own update group.
+
+    Within a group the sweep moves every channel together, so the median is what
+    each should read. Marker slams move the whole group and cancel out; a single
+    channel going its own way does not.
     """
     out = []
-    med = np.median(ch[:, moving], axis=1)
-    for i in moving:
-        bad = np.abs(ch[:, i] - med) > tol
-        if not bad.any():
+    for g in groups:
+        if len(g) < 3:
             continue
-        edges = np.diff(np.concatenate(([0], bad.view(np.int8), [0])))
-        for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
-            if b - a < min_frames:
+        med = np.median(ch[:, g], axis=1)
+        for i in g:
+            bad = np.abs(ch[:, i] - med) > tol
+            if not bad.any():
                 continue
-            worst = int(np.abs(ch[a:b, i] - med[a:b]).max())
-            out.append({"kind": "diverged", "ch": i + 1, "start": t[a], "end": t[b - 1],
-                        "detail": f"up to {worst} ticks off consensus"})
+            edges = np.diff(np.concatenate(([0], bad.view(np.int8), [0])))
+            for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+                if b - a < min_frames:
+                    continue
+                worst = int(np.abs(ch[a:b, i] - med[a:b]).max())
+                out.append({"kind": "diverged", "ch": i + 1, "start": t[a],
+                            "end": t[b - 1],
+                            "detail": f"up to {worst} ticks off group consensus"})
     return out
 
 
@@ -76,7 +101,15 @@ def main():
     p.add_argument("--diverge-ticks", type=int, default=40)
     p.add_argument("--min-diverge-frames", type=int, default=3)
     p.add_argument("--cluster-s", type=float, default=0.5)
+    p.add_argument("--ignore", default="",
+                   help="channels to exclude entirely, e.g. 5 or 5,12")
+    p.add_argument("--ignore-arm", action="store_true",
+                   help="shorthand for --ignore 5")
     args = p.parse_args()
+
+    ignore = {int(x) for x in args.ignore.replace(",", " ").split()}
+    if args.ignore_arm:
+        ignore.add(5)
 
     t, ch = load_rc(os.path.join(args.rundir, "rc.csv"), args.dir)
     if len(t) == 0:
@@ -100,7 +133,8 @@ def main():
             print(f"   ... and {gaps.size - 15} more")
 
     rng = ch.max(0) - ch.min(0)
-    moving = np.flatnonzero(rng >= 10)
+    moving = np.array([i for i in np.flatnonzero(rng >= 10) if i + 1 not in ignore],
+                      dtype=int)
     d = np.diff(ch, axis=0)
     world = (d[:, moving] != 0).any(axis=1) if moving.size else np.zeros(len(t) - 1, bool)
 
@@ -113,16 +147,24 @@ def main():
         note = []
         if c.min() < TICK_MIN or c.max() > TICK_MAX:
             note.append("OUT-OF-RANGE")
-        if rng[i] < 10:
+        if i + 1 in ignore:
+            note.append("ignored")
+        elif rng[i] < 10:
             note.append("held constant")
         print(f"{i+1:>3} {c.min():>6} {c.max():>6} {ticks_to_us(c.min()):>7.0f} "
               f"{ticks_to_us(c.max()):>7.0f} {len(np.unique(c)):>7} "
               f"{int(np.count_nonzero(d[:, i]))/span:>7.1f}  {' '.join(note)}")
 
     findings = []
+    groups = []
     if moving.size:
+        groups = channel_groups(d, moving)
+        if len(groups) > 1:
+            print(f"\nupdate groups (channels never move together across groups):")
+            for g in groups:
+                print(f"  {[int(i) + 1 for i in g]}")
         findings += find_stuck(t, ch, moving, world, args.stuck_s)
-        findings += find_diverged(t, ch, moving, args.diverge_ticks,
+        findings += find_diverged(t, ch, groups, args.diverge_ticks,
                                   args.min_diverge_frames)
 
     print(f"\nchannel behaviour (stuck >={args.stuck_s}s, diverged >{args.diverge_ticks} "
@@ -146,7 +188,7 @@ def main():
         print(f"\n{len(windows)} window(s) to look at:")
         for w in windows[:10]:
             print(f"  t={w['start']:9.4f}s..{w['end']:9.4f}s  "
-                  f"ch {sorted(w['chs'])}")
+                  f"ch {sorted(int(c) for c in w['chs'])}")
             print(f"     ./crsf_slice.py {args.rundir}/raw.bin "
                   f"--start {max(0, w['start']-0.2):.3f} --end {w['end']+0.2:.3f} "
                   f"-o {args.rundir}/bug-{w['start']:.3f}.sr")
