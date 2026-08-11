@@ -147,13 +147,13 @@ def main():
     p.add_argument("--diverge-ticks", type=int, default=40)
     p.add_argument("--min-diverge-frames", type=int, default=3)
     p.add_argument("--cluster-s", type=float, default=0.5)
-    p.add_argument("--ignore", default="",
-                   help="channels to exclude entirely, e.g. 5 or 5,12")
+    p.add_argument("--ignore-ch", "--ignore", dest="ignore_ch", default="",
+                   help="channels to exclude entirely, e.g. --ignore-ch 9,10,11")
     p.add_argument("--ignore-arm", action="store_true",
-                   help="shorthand for --ignore 5")
+                   help="shorthand for --ignore-ch 5")
     args = p.parse_args()
 
-    ignore = {int(x) for x in args.ignore.replace(",", " ").split()}
+    ignore = {int(x) for x in args.ignore_ch.replace(",", " ").split()}
     if args.ignore_arm:
         ignore.add(5)
 
