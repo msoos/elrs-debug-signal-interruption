@@ -239,6 +239,19 @@ def main():
         findings += find_diverged(t, ch, groups, args.diverge_ticks,
                                   args.min_diverge_frames)
 
+    # one ALL-FROZEN says what 15 per-channel stuck lines say, and the display
+    # is capped -- without this the important finding gets crowded out
+    frozen = [f for f in findings if f["kind"] == "ALL-FROZEN"]
+
+    def covered(f):
+        for z in frozen:
+            ov = min(f["end"], z["end"]) - max(f["start"], z["start"])
+            if ov > 0.5 * (f["end"] - f["start"]):
+                return True
+        return False
+
+    findings = [f for f in findings if f["kind"] != "stuck" or not covered(f)]
+
     print(f"\nchannel behaviour (stuck >={args.stuck_s}s, diverged >{args.diverge_ticks} "
           f"ticks from consensus):")
     if not findings:
