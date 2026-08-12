@@ -30,6 +30,67 @@ response, recovery around 12:51:05, normal landing at 12:52:50. Flight 2
 Blind spot: `RxBt` (12.5 → 11.8 V) is the flight pack read through EXT-V, not
 the receiver/servo rail, so the BEC output was never observed.
 
+### What `ANT` adds
+
+The ER8GV is a diversity receiver: two antennas mounted on opposite sides of the
+fuselage, and the `ANT` column records which one the receiver had selected. As
+the airframe yaws, the antenna facing the transmitter changes, so `ANT` is a
+coarse **receiver-side witness of aircraft heading** — the only observable in the
+log that reports what the airframe actually did, as opposed to what the pilot
+asked for. Everything else in the log is either the pilot's side of the link or a
+scalar the receiver reports about itself.
+
+Both logs are in `flights.db` (built by `logs_to_sqlite.py`); `ant_analyze.py`
+produces everything below.
+
+**The witness is real but noisy.** `ANT=0` tracks `1RSS > 2RSS` (−77.1/−88.3 dB
+mean in flight 1) and `ANT=1` tracks the reverse, so the field is a genuine
+diversity selector, not noise. Against commanded control effort — mean
+`max(|Rud|,|Ail|)` over 10 s windows — switch rate correlates at r = +0.395
+(flight 1) and +0.401 (flight 2), and the top effort quartile has *no*
+zero-switch window in either flight. So hard turning always moved the antenna,
+but the converse is weak: a still antenna is only weakly evidence of still air.
+
+**Caveat that matters for the rest of the log:** only the *selected* antenna's
+RSSI is refreshed. `1RSS` changes on 86 % of samples while `ANT=0` but only 45 %
+while `ANT=1`, and symmetrically for `2RSS`. The unselected value is stale, so
+`1RSS − 2RSS` is not a usable heading proxy, and any claim about link margin
+during a long `ANT` freeze covers one antenna only — during flight 2's episode
+antenna 2 went unsampled for 48 s.
+
+**What the episodes look like.** In each flight the longest antenna dwell of that
+flight falls in or beside the episode, while the sticks were being worked hard:
+
+| | flight 1 | flight 2 |
+|---|---|---|
+| longest commanded-but-mute run | 21.5 s @ 12:50:37 | 22.5 s @ 13:33:37 |
+| peak effort in it | 0.78 | 0.54 |
+| min `RQly` in it | 92 | 98 |
+| such runs elsewhere in flight | none | none |
+
+In flight 2 the freeze is 48.5 s (13:33:01.7–13:33:49.7) against a 25.0 s
+runner-up, and it spans the whole 50 m → 11 m descent. In flight 1 the episode
+holds a 22.0 s freeze from 12:50:27.190 — one sample after camber deployment —
+through which aileron swings between −725 and +1024 with no antenna response at
+all.
+
+**But it does not reach significance.** Rotating the `ANT` switch train
+circularly against the stick series — which destroys the alignment while leaving
+each series' own autocorrelation intact — a commanded-but-mute run this long
+overlapping the episode arises by chance with p = 0.15 (flight 1) and p = 0.30
+(flight 2); Fisher-combined, p = 0.19. The reason is the base rate: gliders fly
+straight a lot, long antenna dwells are ordinary, and the episodes are a large
+slice of each flight. The "0 of 322 windows elsewhere" figure in the per-quartile
+table is not 322 independent samples — 10 s windows stepped 0.5 s apart are
+roughly sixteen independent observations, and the rotation test is what accounts
+for that.
+
+So `ANT` is **consistent with** frozen PWM outputs and adds a genuinely
+independent line of evidence — one that a stuck-servo or airframe explanation
+would not produce, since those leave the receiver's antenna selection free to
+follow a still-manoeuvring airframe. It does not on its own confirm the
+hypothesis, and it does not refute it.
+
 ## Analysis
 
 ### Leading hypothesis
