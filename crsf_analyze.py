@@ -117,6 +117,38 @@ def find_frozen_all(t, ch, active, stuck_s):
     return out, worst
 
 
+def find_frozen_group(t, ch, groups, stuck_s):
+    """One update group stopped while another kept moving.
+
+    16ch Rate/2 sends ch1-8 and ch9-16 on alternate packets, so half the
+    payload can stall on its own. That is neither a total freeze nor a single
+    stuck channel, and it is reported per-channel otherwise.
+    """
+    out, worst = [], {"dur": 0.0, "at": None, "ch": None}
+    if len(groups) < 2:
+        return out, worst
+    for gi, g in enumerate(groups):
+        others = [i for j, gg in enumerate(groups) if j != gi for i in gg]
+        if not others:
+            continue
+        mine = (np.diff(ch[:, g], axis=0) != 0).any(axis=1)
+        theirs = (np.diff(ch[:, others], axis=0) != 0).any(axis=1)
+        pts = np.concatenate(([0], np.flatnonzero(mine) + 1, [len(t) - 1]))
+        chs = [int(i) + 1 for i in g]
+        for a, b in zip(pts[:-1], pts[1:]):
+            if b <= a or not theirs[a:b].any():
+                continue
+            dur = t[b] - t[a]
+            if dur > worst["dur"]:
+                worst = {"dur": dur, "at": t[a], "ch": chs[0]}
+            if dur >= stuck_s:
+                out.append({"kind": "GROUP-FROZEN", "ch": chs[0], "chs": chs,
+                            "start": t[a], "end": t[b],
+                            "detail": f"ch {chs} held {int(ch[a, g[0]])} for "
+                                      f"{dur:.2f}s while the other group moved"})
+    return out, worst
+
+
 def channel_groups(d, moving):
     """Cluster channels by which frames they update on.
 
@@ -188,9 +220,10 @@ def find_jump_all(t, ch, groups, max_step, allow_slam):
             if abs(d[k]) > worst["ticks"]:
                 worst = {"ticks": int(abs(d[k])), "at": float(t[k + 1]), "ch": None}
             if abs(d[k]) > max_step:
-                out.append({"kind": "ALL-JUMP", "ch": 0, "start": float(t[k]),
-                            "end": float(t[k + 1]),
-                            "detail": f"every channel jumped {int(a)}->{int(b)} "
+                chs = [int(i) + 1 for i in g]
+                out.append({"kind": "ALL-JUMP", "ch": chs[0], "chs": chs,
+                            "start": float(t[k]), "end": float(t[k + 1]),
+                            "detail": f"ch {chs} all jumped {int(a)}->{int(b)} "
                                       f"({int(d[k]):+d} ticks) in one frame"})
     return out, worst
 
@@ -273,26 +306,33 @@ def main():
     stuck_w = {"dur": 0.0, "at": None, "ch": None}
     div_w = {"ticks": 0, "at": None, "ch": None}
     jump_w = {"ticks": 0, "at": None, "ch": None}
+    gfz_w = {"dur": 0.0, "at": None, "ch": None}
     if moving.size:
         groups = channel_groups(d, moving)
         stuck_f, stuck_w = find_stuck(t, ch, moving, world, args.stuck_s)
         div_f, div_w = find_diverged(t, ch, groups, args.diverge_ticks,
                                      args.min_diverge_frames)
         jump_f, jump_w = find_jump_all(t, ch, groups, args.max_step, args.marker)
-        findings += stuck_f + div_f + jump_f
+        gfz_f, gfz_w = find_frozen_group(t, ch, groups, args.stuck_s)
+        findings += stuck_f + div_f + jump_f + gfz_f
 
     # one ALL-FROZEN says what 15 per-channel stuck lines say, and the display
     # is capped -- without this the important finding gets crowded out
-    frozen = [f for f in findings if f["kind"] == "ALL-FROZEN"]
+    allfz = [f for f in findings if f["kind"] == "ALL-FROZEN"]
+    grpfz = [f for f in findings if f["kind"] == "GROUP-FROZEN"]
 
-    def covered(f):
-        for z in frozen:
+    def covered_by(f, zs):
+        for z in zs:
             ov = min(f["end"], z["end"]) - max(f["start"], z["start"])
-            if ov > 0.5 * (f["end"] - f["start"]):
+            if ov <= 0.5 * (f["end"] - f["start"]):
+                continue
+            if "chs" not in z or f["ch"] in z["chs"]:
                 return True
         return False
 
-    findings = [f for f in findings if f["kind"] != "stuck" or not covered(f)]
+    findings = [f for f in findings
+                if not (f["kind"] == "GROUP-FROZEN" and covered_by(f, allfz))
+                and not (f["kind"] == "stuck" and covered_by(f, allfz + grpfz))]
 
     swept = ",".join(str(int(i) + 1) for i in moving) or "none"
     const = [i + 1 for i in range(16) if i + 1 not in ignore and rng[i] < 10]
@@ -326,6 +366,11 @@ def main():
           f"flags >{args.diverge_ticks} for >={args.min_diverge_frames} frames",
           can_diverge)
 
+    check("one group froze", not any(f["kind"] == "GROUP-FROZEN" for f in findings),
+          f"longest one group held while another moved {gfz_w['dur']:.3f}s"
+          f"{' from ch' + str(gfz_w['ch']) if gfz_w['ch'] else ''}{at(gfz_w)}"
+          if len(groups) > 1 else "only one update group",
+          f"flags >={args.stuck_s}s", len(groups) > 1)
     check("all jumped at once", not any(f["kind"] == "ALL-JUMP" for f in findings),
           f"largest one-frame move of the whole group {jump_w['ticks']} ticks{at(jump_w)}"
           if moving.size else "no channel was sweeping",
@@ -333,8 +378,8 @@ def main():
           bool(moving.size))
 
     if not findings:
-        if can_compare and moving.size and can_diverge:
-            print("  -> all four checks ran and found nothing")
+        if can_compare and moving.size and can_diverge and len(groups) > 1:
+            print("  -> all five checks ran and found nothing")
         else:
             print("  -> nothing found, but not every check could run (see n/a above)")
     else:
@@ -350,15 +395,16 @@ def main():
         for f in sorted(findings, key=lambda f: f["start"]):
             if windows and f["start"] - windows[-1]["end"] <= args.cluster_s:
                 windows[-1]["end"] = max(windows[-1]["end"], f["end"])
-                windows[-1]["chs"].add(f["ch"])
+                windows[-1]["chs"].update(f.get("chs", [f["ch"]]))
             else:
-                windows.append({"start": f["start"], "end": f["end"], "chs": {f["ch"]}})
+                windows.append({"start": f["start"], "end": f["end"],
+                                "chs": set(f.get("chs", [f["ch"]]))})
         order = sorted(windows, key=lambda w: w["start"] - w["end"])
         print(f"\n{len(windows)} window(s) to look at, longest first:")
         for w in order[:10]:
             chs = sorted(int(c) for c in w["chs"])
             print(f"  {w['end']-w['start']:8.3f}s  t={w['start']:9.4f}s..{w['end']:9.4f}s"
-                  f"  ch {'ALL' if chs == [0] else chs}")
+                  f"  ch {'ALL' if 0 in chs else chs}")
             print(f"     ./crsf_slice.py {args.rundir}/raw.bin "
                   f"--start {max(0, w['start']-0.2):.3f} --end {w['end']+0.2:.3f} "
                   f"-o {args.rundir}/bug-{w['start']:.3f}.sr")
