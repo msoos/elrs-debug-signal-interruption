@@ -353,13 +353,17 @@ def main():
                 windows[-1]["chs"].add(f["ch"])
             else:
                 windows.append({"start": f["start"], "end": f["end"], "chs": {f["ch"]}})
-        print(f"\n{len(windows)} window(s) to look at:")
-        for w in windows[:10]:
-            print(f"  t={w['start']:9.4f}s..{w['end']:9.4f}s  "
-                  f"ch {sorted(int(c) for c in w['chs'])}")
+        order = sorted(windows, key=lambda w: w["start"] - w["end"])
+        print(f"\n{len(windows)} window(s) to look at, longest first:")
+        for w in order[:10]:
+            chs = sorted(int(c) for c in w["chs"])
+            print(f"  {w['end']-w['start']:8.3f}s  t={w['start']:9.4f}s..{w['end']:9.4f}s"
+                  f"  ch {'ALL' if chs == [0] else chs}")
             print(f"     ./crsf_slice.py {args.rundir}/raw.bin "
                   f"--start {max(0, w['start']-0.2):.3f} --end {w['end']+0.2:.3f} "
                   f"-o {args.rundir}/bug-{w['start']:.3f}.sr")
+        if len(order) > 10:
+            print(f"  ... and {len(order) - 10} more (shortest omitted)")
 
     ev_path = os.path.join(args.rundir, "events.jsonl")
     if os.path.exists(ev_path):
