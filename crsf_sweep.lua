@@ -3,27 +3,29 @@
 local toolName = "TNS|CRSF Sweep|TNE"
 
 local GV, FM = 0, 0
-local SLAM, RAMP, DWELL = 20, 300, 20
+local SLAM = 20
+local RAMP = 300
+local STEP, RAMP_MIN, RAMP_MAX = 25, 25, 3000
 
 -- MARKER inserts a lo/hi/lo slam before each ramp: a sharp edge to measure
 -- end-to-end latency with. It shows up as a spike at the bottom of the sweep.
 local MARKER = false
 
-local PHASES = {
-  {RAMP,  -100,  100, "ramp up"},
-  {DWELL,  100,  100, "hold hi"},
-  {RAMP,   100, -100, "ramp dn"},
-  {DWELL, -100, -100, "hold lo"},
-}
+local PHASES, CYCLE = {}, 0
 
-if MARKER then
-  table.insert(PHASES, 1, {SLAM, -100, -100, "mark lo"})
-  table.insert(PHASES, 1, {SLAM,  100,  100, "mark hi"})
-  table.insert(PHASES, 1, {SLAM, -100, -100, "mark lo"})
+local function rebuild()
+  PHASES = {
+    {RAMP, -100,  100, "ramp up"},
+    {RAMP,  100, -100, "ramp dn"},
+  }
+  if MARKER then
+    table.insert(PHASES, 1, {SLAM, -100, -100, "mark lo"})
+    table.insert(PHASES, 1, {SLAM,  100,  100, "mark hi"})
+    table.insert(PHASES, 1, {SLAM, -100, -100, "mark lo"})
+  end
+  CYCLE = 0
+  for i = 1, #PHASES do CYCLE = CYCLE + PHASES[i][1] end
 end
-
-local CYCLE = 0
-for i = 1, #PHASES do CYCLE = CYCLE + PHASES[i][1] end
 
 local t0 = 0
 
@@ -40,6 +42,7 @@ local function valueAt(t)
 end
 
 local function init()
+  rebuild()
   t0 = getTime()
 end
 
@@ -49,6 +52,16 @@ local function run(event)
     return 1
   end
 
+  if event == EVT_VIRTUAL_INC or event == EVT_VIRTUAL_NEXT then
+    RAMP = math.min(RAMP_MAX, RAMP + STEP)
+    rebuild()
+    t0 = getTime()
+  elseif event == EVT_VIRTUAL_DEC or event == EVT_VIRTUAL_PREV then
+    RAMP = math.max(RAMP_MIN, RAMP - STEP)
+    rebuild()
+    t0 = getTime()
+  end
+
   local el = getTime() - t0
   local v, phase = valueAt(el % CYCLE)
   v = math.floor(v + 0.5)
@@ -56,10 +69,10 @@ local function run(event)
 
   lcd.clear()
   lcd.drawText(1, 1, "CRSF Sweep", INVERS)
-  lcd.drawText(1, 12, phase .. "   GV" .. (GV + 1) .. " = " .. v .. "%")
-  lcd.drawText(1, 23, "cycle " .. math.floor(el / CYCLE) ..
-                      "   " .. math.floor(el / 100) .. "s")
-  lcd.drawText(1, 34, "EXIT stops, leaves -100%")
+  lcd.drawText(1, 12, string.format("ramp %.2fs  cyc %.2fs", RAMP / 100, CYCLE / 100))
+  lcd.drawText(1, 23, string.format("GV%d = %d%%  %s", GV + 1, v, phase))
+  lcd.drawText(1, 34, "+/- or wheel = speed")
+  lcd.drawText(1, 45, "EXIT stops")
   return 0
 end
 
