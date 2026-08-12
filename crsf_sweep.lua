@@ -5,15 +5,22 @@ local toolName = "TNS|CRSF Sweep|TNE"
 local GV, FM = 0, 0
 local SLAM, RAMP, DWELL = 20, 300, 20
 
+-- MARKER inserts a lo/hi/lo slam before each ramp: a sharp edge to measure
+-- end-to-end latency with. It shows up as a spike at the bottom of the sweep.
+local MARKER = false
+
 local PHASES = {
-  {SLAM,  -100, -100, "mark lo"},
-  {SLAM,   100,  100, "mark hi"},
-  {SLAM,  -100, -100, "mark lo"},
   {RAMP,  -100,  100, "ramp up"},
   {DWELL,  100,  100, "hold hi"},
   {RAMP,   100, -100, "ramp dn"},
   {DWELL, -100, -100, "hold lo"},
 }
+
+if MARKER then
+  table.insert(PHASES, 1, {SLAM, -100, -100, "mark lo"})
+  table.insert(PHASES, 1, {SLAM,  100,  100, "mark hi"})
+  table.insert(PHASES, 1, {SLAM, -100, -100, "mark lo"})
+end
 
 local CYCLE = 0
 for i = 1, #PHASES do CYCLE = CYCLE + PHASES[i][1] end

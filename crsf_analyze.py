@@ -169,6 +169,32 @@ def find_diverged(t, ch, groups, tol, min_frames):
     return out, worst
 
 
+def find_jump_all(t, ch, groups, max_step, allow_slam):
+    """Every channel jumping at once — invisible to the consensus checks.
+
+    All 16 channels share one 22-byte payload, so corruption hits them
+    together and the cross-channel median moves with them. Only the sweep's
+    own bounded slew rate says this is impossible.
+    """
+    out, worst = [], {"ticks": 0, "at": None, "ch": None}
+    for g in groups:
+        med = np.median(ch[:, g], axis=1)
+        d = np.diff(med)
+        lo, hi = med.min(), med.max()
+        for k in np.flatnonzero(np.abs(d) > 1):
+            a, b = med[k], med[k + 1]
+            if allow_slam and min(a, b) <= lo + 40 and max(a, b) >= hi - 40:
+                continue  # marker slam: endpoint to endpoint
+            if abs(d[k]) > worst["ticks"]:
+                worst = {"ticks": int(abs(d[k])), "at": float(t[k + 1]), "ch": None}
+            if abs(d[k]) > max_step:
+                out.append({"kind": "ALL-JUMP", "ch": 0, "start": float(t[k]),
+                            "end": float(t[k + 1]),
+                            "detail": f"every channel jumped {int(a)}->{int(b)} "
+                                      f"({int(d[k]):+d} ticks) in one frame"})
+    return out, worst
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -180,6 +206,10 @@ def main():
     p.add_argument("--diverge-ticks", type=int, default=40)
     p.add_argument("--min-diverge-frames", type=int, default=3)
     p.add_argument("--cluster-s", type=float, default=0.5)
+    p.add_argument("--max-step", type=int, default=100,
+                   help="ticks all channels may move in one frame (default 100)")
+    p.add_argument("--marker", action="store_true",
+                   help="sweep has lo/hi/lo marker slams; ignore endpoint-to-endpoint jumps")
     p.add_argument("--ignore-ch", "--ignore", dest="ignore_ch", default="",
                    help="channels to exclude entirely, e.g. --ignore-ch 9,10,11")
     p.add_argument("--ignore-arm", action="store_true",
@@ -242,12 +272,14 @@ def main():
     groups = []
     stuck_w = {"dur": 0.0, "at": None, "ch": None}
     div_w = {"ticks": 0, "at": None, "ch": None}
+    jump_w = {"ticks": 0, "at": None, "ch": None}
     if moving.size:
         groups = channel_groups(d, moving)
         stuck_f, stuck_w = find_stuck(t, ch, moving, world, args.stuck_s)
         div_f, div_w = find_diverged(t, ch, groups, args.diverge_ticks,
                                      args.min_diverge_frames)
-        findings += stuck_f + div_f
+        jump_f, jump_w = find_jump_all(t, ch, groups, args.max_step, args.marker)
+        findings += stuck_f + div_f + jump_f
 
     # one ALL-FROZEN says what 15 per-channel stuck lines say, and the display
     # is capped -- without this the important finding gets crowded out
@@ -294,9 +326,15 @@ def main():
           f"flags >{args.diverge_ticks} for >={args.min_diverge_frames} frames",
           can_diverge)
 
+    check("all jumped at once", not any(f["kind"] == "ALL-JUMP" for f in findings),
+          f"largest one-frame move of the whole group {jump_w['ticks']} ticks{at(jump_w)}"
+          if moving.size else "no channel was sweeping",
+          f"flags >{args.max_step}" + (" (marker slams ignored)" if args.marker else ""),
+          bool(moving.size))
+
     if not findings:
         if can_compare and moving.size and can_diverge:
-            print("  -> all three checks ran and found nothing")
+            print("  -> all four checks ran and found nothing")
         else:
             print("  -> nothing found, but not every check could run (see n/a above)")
     else:
